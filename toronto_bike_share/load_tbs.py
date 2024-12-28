@@ -6,7 +6,13 @@ from zipfile import ZipFile
 
 import duckdb
 import requests
+from duckdb import DuckDBPyConnection
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)-8s %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
 LOGGER = logging.getLogger()
 
 BASE_URL = "https://ckan0.cf.opendata.inter.prod-toronto.ca/dataset/7e876c24-177c-4605-9cef-e50dd74c617f/resource"
@@ -17,16 +23,20 @@ YEAR_MAP = {
     2024: "9a9a0163-8114-447c-bf66-790b1a92da51",
 }
 REMOVE_FOLDER = {2022, 2023}
+BAD_YEAR = 2022
 
 
-def setup_duckdb(conn) -> None:
+def setup_duckdb(conn: DuckDBPyConnection) -> None:
     conn.install_extension("httpfs")
     conn.load_extension("httpfs")
+    conn.execute("SET threads TO 2;")
 
 
 # TODO: Simplify with fsspec `zip://file 202*.csv`
 def download_data(years: list[int], unzip: bool = True) -> None:
+    LOGGER.info("Beginning data download")
     for year, resource_id in filter(lambda x: x[0] in years, YEAR_MAP.items()):
+        LOGGER.info("Downloading data for year: %s", year)
         url = f"{BASE_URL}/{resource_id}/download/bikeshare-ridership-{year}.zip"
         r = requests.get(url, timeout=60)
         z = ZipFile(io.BytesIO(r.content))
@@ -36,26 +46,36 @@ def download_data(years: list[int], unzip: bool = True) -> None:
             continue
 
         # Special case
-        if year == 2022:
+        if year == BAD_YEAR:
             jank_file = "data/bikeshare-ridership-2022/Bike share ridership 2022-11.zip"
             with ZipFile(jank_file) as z:
                 z.extractall("data/bikeshare-ridership-2022")
-            os.remove(jank_file)
+            Path(jank_file).unlink()
 
         if year in REMOVE_FOLDER:
             for root, _, files in os.walk(f"data/bikeshare-ridership-{year}"):
                 for file in files:
-                    os.rename(Path(root, file), Path("data", file))
-                os.removedirs(root)
+                    Path(root, file).rename(Path("data", file))
+                Path(root).rmdir()
 
 
-def load_data(conn) -> None:
-    # try:
-    #     conn.sql("""CREATE TYPE user AS ENUM ('Casual Member', 'Annual Member')""")
-    #     conn.sql("""CREATE TYPE bike AS ENUM ('EFIT G5', 'ICONIC', 'EFIT')""")
-    # except duckdb.CatalogException:
-    #     LOGGER.info("`User Type` enum is already defined")
+def remove_csv() -> None:
+    LOGGER.info("Removing csv files")
+    for root, _, files in os.walk("data"):
+        for file in files:
+            path = Path(root, file)
+            if path.is_file() and path.suffix == ".csv":
+                path.unlink()
 
+
+def load_data(conn: DuckDBPyConnection) -> None:
+    try:
+        conn.sql("""CREATE TYPE user AS ENUM ('Casual Member', 'Annual Member')""")
+        conn.sql("""CREATE TYPE bike AS ENUM ('EFIT G5', 'ICONIC', 'EFIT')""")
+    except duckdb.CatalogException:
+        LOGGER.info("`User Type` enum is already defined")
+
+    LOGGER.debug("Creating table tbs_trips")
     conn.sql("""
     CREATE TABLE IF NOT EXISTS tbs_trips (
         "Trip Id" INTEGER,
@@ -67,10 +87,13 @@ def load_data(conn) -> None:
         "End Time" TIMESTAMP,
         "End Station Name" VARCHAR,
         "Bike Id" INTEGER,
-        "User Type" VARCHAR,
-        "Model" VARCHAR);
+        "User Type" user,
+        "Model" bike);
              """)
-    conn.sql("""
+
+    LOGGER.info("Inserting new data")
+
+    num_rows = conn.execute("""
     INSERT INTO tbs_trips
     SELECT
         "Trip Id",
@@ -97,11 +120,26 @@ def load_data(conn) -> None:
         FROM tbs_trips
         WHERE tbs_trips."Trip Id" = new_data."Trip Id"
     );
-             """)
+             """).fetchone()[0]
+
+    LOGGER.info("Inserted %s rows", num_rows)
+
+
+def export_as_parquet(conn: DuckDBPyConnection) -> None:
+    LOGGER.info("Saving to parquet")
+    conn.execute(
+        """
+        COPY
+            (SELECT * FROM tbs_trips ORDER BY "Trip Id")
+        TO "./data/tbs.parquet"
+        (FORMAT 'parquet', CODEC 'zstd', COMPRESSION_LEVEL 3);"""
+    )
 
 
 if __name__ == "__main__":
     conn = duckdb.connect("data/tbs.db")
     setup_duckdb(conn)
-    # download_data(YEAR_MAP.keys())
+    download_data(YEAR_MAP.keys())
     load_data(conn)
+    remove_csv()
+    export_as_parquet(conn)
