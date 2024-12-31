@@ -1,6 +1,7 @@
 import io
 import logging
 import os
+from collections.abc import Iterable
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -33,7 +34,7 @@ def setup_duckdb(conn: DuckDBPyConnection) -> None:
 
 
 # TODO: Simplify with fsspec `zip://file 202*.csv`
-def download_data(years: list[int], unzip: bool = True) -> None:
+def download_data(years: Iterable[int], unzip: bool = True) -> None:
     LOGGER.info("Beginning data download")
     for year, resource_id in filter(lambda x: x[0] in years, YEAR_MAP.items()):
         LOGGER.info("Downloading data for year: %s", year)
@@ -108,21 +109,22 @@ def load_data(conn: DuckDBPyConnection) -> None:
         "User Type",
         "Model"
     FROM read_csv(
-            'data/Bike share ridership 202*.csv',
-             ignore_errors=true,
-             timestampformat='%m/%d/%Y %H:%M',
-             allow_quoted_nulls=false,
-             union_by_name=true,
-             nullstr='NULL'
+        'data/Bike share ridership 202*.csv',
+        ignore_errors=true,
+        timestampformat='%m/%d/%Y %H:%M',
+        allow_quoted_nulls=false,
+        union_by_name=true,
+        nullstr='NULL'
         ) AS new_data
     WHERE NOT EXISTS (
         SELECT 1
         FROM tbs_trips
         WHERE tbs_trips."Trip Id" = new_data."Trip Id"
     );
-             """).fetchone()[0]
+    """).fetchone()
 
-    LOGGER.info("Inserted %s rows", num_rows)
+    if num_rows:
+        LOGGER.info("Inserted %s rows", num_rows[0])
 
 
 def export_as_parquet(conn: DuckDBPyConnection) -> None:
@@ -132,7 +134,8 @@ def export_as_parquet(conn: DuckDBPyConnection) -> None:
         COPY
             (SELECT * FROM tbs_trips ORDER BY "Trip Id")
         TO "./data/tbs.parquet"
-        (FORMAT 'parquet', CODEC 'zstd', COMPRESSION_LEVEL 3);"""
+        (FORMAT 'parquet', CODEC 'zstd', COMPRESSION_LEVEL 3);
+        """
     )
 
 
@@ -143,3 +146,4 @@ if __name__ == "__main__":
     load_data(conn)
     remove_csv()
     export_as_parquet(conn)
+    LOGGER.info("Data load complete")
