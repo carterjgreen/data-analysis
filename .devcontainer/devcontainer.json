@@ -23,7 +23,8 @@
 				"ms-python.mypy-type-checker",
 				"ms-python.python",
 				"tamasfe.even-better-toml",
-				"oderwat.indent-rainbow"
+				"oderwat.indent-rainbow",
+				"ms-toolsai.jupyter"
 			]
 		}
 	}
